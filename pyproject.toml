@@ -3,21 +3,31 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "voluntrain"
+name = "voluntrain"  # <--- GANTI INI JIKA NAMA 'voluntrain' SUDAH DIAMBIL ORANG
 version = "0.1.0"
-description = "A decentralized volunteer computing library for PyTorch"
+description = "Decentralized Volunteer Computing Library for PyTorch"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-  {name = "Your Name", email = "your.email@example.com"}
+  {name = "Treamyracle", email = "email.anda@example.com"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "torch",
+    "torch>=2.0.0",
     "pyzmq",
     "cloudpickle",
-    "psutil"  # Useful for checking CPU usage later
+    "psutil"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/treamyracle/voluntrain"
+"Homepage" = "https://github.com/Treamyracle/voluntrain"
+"Bug Tracker" = "https://github.com/Treamyracle/voluntrain/issues"
+
+[project.scripts]
+voluntrain = "voluntrain.cli:main"
