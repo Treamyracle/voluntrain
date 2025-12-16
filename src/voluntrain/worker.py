@@ -7,11 +7,28 @@ from .protocol import decode_id, serialize, deserialize
 
 class ElasticWorker:
     def __init__(self, join_id):
-        # 1. Tentukan Device (CUDA jika ada, jika tidak CPU)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"🚀 Worker started using device: {self.device}")
-        if self.device.type == 'cuda':
-            print(f"   GPU Name: {torch.cuda.get_device_name(0)}")
+        # --- UNIVERSAL DEVICE DETECTION ---
+        self.device = torch.device("cpu") # Default fallback
+        
+        # 1. Cek NVIDIA (CUDA) atau AMD (ROCm yang menyamar jadi CUDA)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"🚀 Worker started using GPU: {gpu_name}")
+            
+            # Cek apakah ini AMD (ROCm) atau NVIDIA
+            if torch.version.hip:
+                print("   backend: ROCm (AMD)")
+            else:
+                print("   backend: CUDA (NVIDIA)")
+
+        # 2. Cek Apple Silicon (Mac M1/M2/M3)
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print(f"🚀 Worker started using Apple Metal (MPS)")
+            
+        else:
+            print("🐢 Worker started using CPU (Lambat, tapi jalan)")
 
         host_ip, port = decode_id(join_id)
         self.context = zmq.Context()
