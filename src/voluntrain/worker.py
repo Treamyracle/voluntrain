@@ -7,92 +7,103 @@ from .protocol import decode_id, serialize, deserialize
 
 class ElasticWorker:
     def __init__(self, join_id):
-        # 1. Decode ID menjadi IP dan Port asli
+        # 1. Tentukan Device (CUDA jika ada, jika tidak CPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"🚀 Worker started using device: {self.device}")
+        if self.device.type == 'cuda':
+            print(f"   GPU Name: {torch.cuda.get_device_name(0)}")
+
         host_ip, port = decode_id(join_id)
-        
         self.context = zmq.Context()
         self.host_ip = host_ip
         self.port = port
         
         print(f"Connecting to Host at {host_ip}:{port}...")
         
-        # --- SOCKET SETUP (Harus urutannya sama dengan Host) ---
-        
-        # A. Handshake Socket (REQ) -> Connect ke Host REP (Port + 2)
-        # Gunanya: Bilang "Halo saya mau bantu" ke Host
+        # --- SOCKET SETUP ---
+        # A. Handshake
         self.reg_socket = self.context.socket(zmq.REQ)
         self.reg_socket.connect(f"tcp://{host_ip}:{port+2}")
         
-        # Kirim salam
         print("Knocking on door...")
         self.reg_socket.send_string("KNOCK_KNOCK")
         
-        # Tunggu balasan "WELCOME" dari Host
         resp = self.reg_socket.recv_string() 
         if resp == "WELCOME":
-            print("Access Granted! Successfully joined the training cluster.")
+            print("Access Granted! Joined the cluster.")
         else:
-            print(f"Warning: Received unexpected response: {resp}")
+            print(f"Warning: Unexpected response: {resp}")
         
-        # B. Subscribe Socket (SUB) -> Connect ke Host PUB (Port Utama)
-        # Gunanya: Menerima Model dan Data terbaru
+        # B. Subscribe (Weights)
         self.sub = self.context.socket(zmq.SUB)
         self.sub.connect(f"tcp://{host_ip}:{port}")
-        self.sub.setsockopt_string(zmq.SUBSCRIBE, '') # Subscribe ke semua pesan
+        self.sub.setsockopt_string(zmq.SUBSCRIBE, '')
         
-        # C. Push Socket (PUSH) -> Connect ke Host PULL (Port + 1)
-        # Gunanya: Mengirim hasil hitungan (Gradient) balik ke Host
+        # C. Push (Gradients)
         self.push = self.context.socket(zmq.PUSH)
         self.push.connect(f"tcp://{host_ip}:{port+1}")
 
+    def _move_to_device(self, data):
+        """Fungsi pembantu untuk memindahkan data (List/Tuple/Dict) ke GPU"""
+        if isinstance(data, torch.Tensor):
+            return data.to(self.device)
+        elif isinstance(data, list):
+            return [self._move_to_device(item) for item in data]
+        elif isinstance(data, tuple):
+            return tuple(self._move_to_device(item) for item in data)
+        elif isinstance(data, dict):
+            return {k: self._move_to_device(v) for v in data.items()}
+        return data
+
     def start(self):
-        print("Waiting for work (Model & Data)...")
+        print("Waiting for work...")
         while True:
             try:
-                # 1. Terima Paket (Weights + Model Code + Data)
+                # 1. Terima Data
                 msg = self.sub.recv() 
                 payload = pickle.loads(msg)
                 
-                # 2. Reconstruct Model (Cloudpickle Magic)
-                # Worker tidak perlu file model.py, ia membaca definisi class langsung dari bytes
+                # 2. Load Model
                 model = cloudpickle.loads(payload["model_structure"])
                 model.load_state_dict(payload["state_dict"])
                 
+                # === UPGRADE: PINDAHKAN MODEL KE GPU ===
+                model.to(self.device)
+                model.train() # Pastikan mode training
+                
                 # 3. Siapkan Data Input
-                args = payload["data_args"]
-                kwargs = payload["data_kwargs"]
+                # === UPGRADE: PINDAHKAN INPUT KE GPU ===
+                args = self._move_to_device(payload["data_args"])
+                kwargs = self._move_to_device(payload["data_kwargs"])
                 
-                # ... (di dalam while True) ...
-                
-                # 4. Forward Pass
+                # 4. Forward Pass (Sekarang berjalan di GPU!)
                 output = model(*args, **kwargs)
                 
                 if isinstance(output, torch.Tensor): loss = output
                 elif hasattr(output, 'loss'): loss = output.loss
                 else: loss = output[0]
                 
-                # === FIX DIMULAI DI SINI ===
-                # Pastikan loss menjadi scalar sebelum backward
+                # Fix scalar loss issue
                 if loss.numel() > 1:
                     loss = loss.mean()
-                # === FIX BERAKHIR DI SINI ===
                 
-                # 5. Backward Pass
+                # 5. Backward Pass (Hitung Gradient di GPU)
                 loss.backward()
                 
-                # ... (lanjut ke kirim gradient) ...
+                # 6. Ambil Gradient & PINDAHKAN BALIK KE CPU
+                # Kita harus pindah ke CPU sebelum dikirim lewat jaringan
+                grads = [p.grad.cpu() for p in model.parameters() if p.grad is not None]
                 
-                # 6. Ambil Gradient
-                grads = [p.grad for p in model.parameters()]
-                
-                # 7. Kirim Gradient Balik ke Host
+                # 7. Kirim
                 self.push.send(pickle.dumps(grads))
-                print(f"Batch processed. Gradients sent to Host.")
+                print(f"Batch processed on {self.device}. Sent to Host.")
                 
             except KeyboardInterrupt:
                 print("\nStopping worker...")
                 break
             except Exception as e:
                 print(f"Error processing batch: {e}")
-                # Kita continue agar worker tidak mati total hanya karena 1 batch error
+                # Print detail error GPU jika ada
+                import traceback
+                traceback.print_exc()
                 continue
