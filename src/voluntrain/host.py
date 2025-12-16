@@ -5,7 +5,7 @@ import cloudpickle
 import time
 from .protocol import encode_id, get_local_ip, serialize, deserialize
 
-class ElasticHost:  # <--- Pastikan namanya ini!
+class ElasticHost:
     def __init__(self, model, optimizer, port=5555):
         self.model = model
         self.optimizer = optimizer
@@ -52,8 +52,6 @@ class ElasticHost:  # <--- Pastikan namanya ini!
     def train_step(self, *args, **kwargs):
         self.check_for_new_workers()
         
-# ... (di dalam def train_step) ...
-        
         # Local Forward Pass
         self.optimizer.zero_grad()
         output = self.model(*args, **kwargs)
@@ -63,15 +61,11 @@ class ElasticHost:  # <--- Pastikan namanya ini!
         elif hasattr(output, 'loss'): loss = output.loss
         else: loss = output[0]
             
-        # === FIX DIMULAI DI SINI ===
-        # Jika loss berupa vector (misal [32, 1]), kita harus menjadikannya scalar
+        # Fix scalar loss issue
         if loss.numel() > 1:
             loss = loss.mean() 
-        # === FIX BERAKHIR DI SINI ===
 
-        loss.backward() # Sekarang aman karena loss sudah pasti 1 angka
-        
-        # ... (lanjut ke Distributed Logic) ...
+        loss.backward()
         
         # Distributed Logic
         if self.active_workers > 0:
@@ -93,10 +87,16 @@ class ElasticHost:  # <--- Pastikan namanya ini!
                     remote_grads = pickle.loads(msg)
                     
                     for param, r_grad in zip(self.model.parameters(), remote_grads):
-                        if param.grad is None:
-                            param.grad = r_grad
-                        else:
-                            param.grad += r_grad
+                        # === PERBAIKAN UTAMA ===
+                        # Pindahkan gradient worker ke device yang sama dengan parameter host (GPU/CPU)
+                        if r_grad is not None:
+                            r_grad = r_grad.to(param.device) 
+                            
+                            if param.grad is None:
+                                param.grad = r_grad
+                            else:
+                                param.grad += r_grad
+                        # =======================
                     
                     collected_grads += 1
                 else:
@@ -112,6 +112,7 @@ class ElasticHost:  # <--- Pastikan namanya ini!
         self.optimizer.step()
         
         if self.active_workers > 0:
-            print(f"Step complete. Host + {self.active_workers} Workers.")
-        else:
-            print("Step complete (Host only).")
+            # print(f"Step complete. Host + {self.active_workers} Workers.") # Optional: Comment out biar gak spam
+            pass
+        # else:
+            # print("Step complete (Host only).")
